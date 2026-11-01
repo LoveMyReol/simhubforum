@@ -1,0 +1,68 @@
+name: Sync Releases from Upstream
+
+on:
+  schedule:
+    # 每天检查一次（UTC 时间）
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # 支持手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM: maow318/simhubforum
+        run: |
+          # 获取上游最近的几个 Release
+          gh release list --repo $UPSTREAM --limit 10 --json tagName,name,isDraft,isPrerelease > upstream_releases.json
+
+          # 遍历上游 Release
+          jq -c '.[]' upstream_releases.json | while read -r release; do
+            TAG=$(echo $release | jq -r '.tagName')
+            NAME=$(echo $release | jq -r '.name')
+            IS_DRAFT=$(echo $release | jq -r '.isDraft')
+            IS_PRERELEASE=$(echo $release | jq -r '.isPrerelease')
+
+            # 跳过草稿
+            if [ "$IS_DRAFT" = "true" ]; then
+              echo "跳过草稿: $TAG"
+              continue
+            fi
+
+            # 检查自己仓库是否已有这个 tag 的 Release
+            if gh release view "$TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
+              echo "已存在: $TAG，跳过"
+              continue
+            fi
+
+            echo "正在同步: $TAG ($NAME)"
+
+            # 下载上游该 Release 的所有资产
+            mkdir -p "release-$TAG"
+            gh release download "$TAG" --repo $UPSTREAM --dir "release-$TAG" || true
+
+            # 如果有文件才创建 Release
+            if [ "$(ls -A release-$TAG)" ]; then
+              # 创建 Release 并上传文件
+              gh release create "$TAG" \
+                --title "$NAME" \
+                --notes "镜像自 $UPSTREAM 的 $TAG" \
+                --repo ${{ github.repository }} \
+                $( [ "$IS_PRERELEASE" = "true" ] && echo "--prerelease" ) \
+                release-$TAG/*
+              
+              echo "✅ 成功同步: $TAG"
+            else
+              echo "⚠️ $TAG 没有可下载的资产文件"
+            fi
+
+            rm -rf "release-$TAG"
+          done
